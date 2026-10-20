@@ -1,0 +1,13 @@
+[package]
+name = "holdem-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+# Card / Chips / SeatId live in holdem-agent because bot authors need them and
+# that crate must stay dependency-free. So core depends on agent, never the
+# reverse. (PLAN.md §1 sketched cards in core; this is the one adjustment.)
+holdem-agent = { workspace = true }
+rand = { workspace = true }
+rand_chacha = { workspace = true }

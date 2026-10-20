@@ -1,0 +1,14 @@
+[package]
+name = "holdem-engine"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+holdem-agent = { workspace = true }
+holdem-core = { workspace = true }
+serde_json = { workspace = true }
+rand = { workspace = true }
+rand_chacha = { workspace = true }
+# NOTE: `libc` will be needed when CPU pinning lands (PLAN.md Addendum B).
+# Deliberately absent now so there is no unused dependency.

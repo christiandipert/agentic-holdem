@@ -1,0 +1,9 @@
+[package]
+name = "holdem-agent"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+# INTENTIONALLY DEPENDENCY-FREE. This is the only crate a bot author depends on,
+# so it must not drag in engine internals or a serialization format.
+[dependencies]

@@ -1,1 +1,15 @@
 references/
+
+# Rust
+/target/
+**/*.rs.bk
+
+# Compiled example bots
+bots/cpp_halfpot/halfpot
+
+# Match output
+/runs/
+
+# Python
+__pycache__/
+*.pyc

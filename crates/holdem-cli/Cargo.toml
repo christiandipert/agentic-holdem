@@ -1,0 +1,14 @@
+[package]
+name = "holdem-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "holdem"
+path = "src/main.rs"
+
+[dependencies]
+holdem-agent = { workspace = true }
+holdem-core = { workspace = true }
+holdem-engine = { workspace = true }
