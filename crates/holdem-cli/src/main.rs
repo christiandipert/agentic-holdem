@@ -1,6 +1,9 @@
 //! Command-line arena: prompt for the starting stack, run a match, report.
 
+mod text;
+
 use holdem_engine::{BotSpec, MatchConfig, Seated, SubprocessAgent, Table};
+use text::TextObserver;
 use std::io::{self, Write};
 use std::path::PathBuf;
 
@@ -184,7 +187,6 @@ fn main() {
         seed,
         action_timeout_ms: 20_000,
         time_bank_ms: Some(60_000),
-        verbose: !args.quiet,
     };
 
     // Bot stderr is captured, never treated as a protocol violation.
@@ -218,7 +220,8 @@ fn main() {
     );
     println!("(replay this match exactly with --seed {seed})");
 
-    let mut table = Table::new(cfg.clone(), agents);
+    let mut table = Table::new(cfg.clone(), agents)
+        .with_observer(Box::new(TextObserver::new(!args.quiet)));
     table.run();
 
     report(&table, &cfg);

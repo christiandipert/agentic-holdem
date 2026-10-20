@@ -2,6 +2,7 @@ references/
 
 # Rust
 /target/
+crates/holdem-gui/target/
 **/*.rs.bk
 
 # Compiled example bots

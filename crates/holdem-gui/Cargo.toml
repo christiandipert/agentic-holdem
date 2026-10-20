@@ -1,0 +1,18 @@
+# Standalone workspace: this crate is excluded from the root workspace so the
+# engine and CLI keep building on the older system toolchain.
+[workspace]
+
+[package]
+name = "holdem-gui"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "holdem-gui"
+path = "src/main.rs"
+
+[dependencies]
+eframe = "0.33"
+holdem-agent = { path = "../holdem-agent" }
+holdem-core = { path = "../holdem-core" }
+holdem-engine = { path = "../holdem-engine" }

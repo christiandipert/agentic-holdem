@@ -36,7 +36,10 @@ impl Fault {
 }
 
 /// What the table requires of a seat, regardless of binding.
-pub trait Seated {
+///
+/// `Send` so a whole match can be moved onto a worker thread, which is how the
+/// GUI runs a live match without blocking its own render loop.
+pub trait Seated: Send {
     fn name(&self) -> &str;
     fn entry(&mut self, ctx: &MatchContext) -> Result<(), Fault>;
     fn on_action(&mut self, view: &PlayerView<'_>) -> Result<Action, Fault>;

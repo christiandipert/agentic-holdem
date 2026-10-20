@@ -1,6 +1,10 @@
 [workspace]
 resolver = "2"
 members = ["crates/holdem-agent", "crates/holdem-core", "crates/holdem-engine", "crates/holdem-cli"]
+# holdem-gui is deliberately NOT a member. Its GUI dependency tree requires a
+# newer toolchain than the engine targets, and excluding it keeps `cargo build`
+# and `cargo test` working on the system Rust 1.75. See crates/holdem-gui/README.
+exclude = ["crates/holdem-gui"]
 
 [workspace.package]
 version = "0.1.0"

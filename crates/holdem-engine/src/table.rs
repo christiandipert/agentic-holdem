@@ -1,5 +1,6 @@
 //! The hand loop: blinds, betting rounds, showdown, and payout.
 
+use crate::events::{MatchEvent, Observer, Outcome};
 use crate::seated::{Fault, Seated};
 use holdem_agent::{
     Action, Card, Chips, HandResult, HandStart, LoggedAction, MatchContext, PlayerView, PotResult,
@@ -18,7 +19,6 @@ pub struct MatchConfig {
     /// Advisory in this build: sent to bots, not enforced. See `PLAN.md` §4.
     pub action_timeout_ms: u64,
     pub time_bank_ms: Option<u64>,
-    pub verbose: bool,
 }
 
 impl Default for MatchConfig {
@@ -32,7 +32,6 @@ impl Default for MatchConfig {
             seed: 1,
             action_timeout_ms: 20_000,
             time_bank_ms: Some(60_000),
-            verbose: true,
         }
     }
 }
@@ -80,13 +79,6 @@ impl Seat {
     }
 }
 
-/// What we did with the action a bot asked for.
-enum Resolution {
-    Clean,
-    Normalized(String),
-    Violation(String),
-}
-
 pub struct Table {
     cfg: MatchConfig,
     agents: Vec<Box<dyn Seated>>,
@@ -97,6 +89,7 @@ pub struct Table {
     hand_log: Vec<LoggedAction>,
     pub hands_played: u32,
     total_chips: Chips,
+    observer: Option<Box<dyn Observer>>,
 }
 
 impl Table {
@@ -125,7 +118,34 @@ impl Table {
             board: Vec::with_capacity(5),
             hand_log: Vec::with_capacity(64),
             hands_played: 0,
+            observer: None,
         }
+    }
+
+    /// Attach a consumer for match events. The table narrates through this
+    /// instead of printing, so the CLI and the GUI see exactly the same thing.
+    pub fn with_observer(mut self, observer: Box<dyn Observer>) -> Self {
+        self.observer = Some(observer);
+        self
+    }
+
+    /// Events are built before this is called, so nothing borrows `self`.
+    fn emit(&mut self, event: MatchEvent) {
+        if let Some(o) = self.observer.as_mut() {
+            o.on_event(&event);
+        }
+    }
+
+    fn stacks(&self) -> Vec<Chips> {
+        self.seats.iter().map(|s| s.stack).collect()
+    }
+
+    fn street_bets(&self) -> Vec<Chips> {
+        self.seats.iter().map(|s| s.street_bet).collect()
+    }
+
+    fn pot(&self) -> Chips {
+        self.seats.iter().map(|s| s.committed).sum()
     }
 
     pub fn n(&self) -> usize {
@@ -186,8 +206,9 @@ impl Table {
                 rng_seed: holdem_core::agent_seed(self.cfg.seed, i as u8),
             };
             if let Err(e) = self.agents[i].entry(&ctx) {
-                eprintln!("  !! seat {i} failed to start: {e}");
                 self.seats[i].status = SeatStatus::Disqualified;
+                let why = format!("failed to start: {e}");
+                self.emit(MatchEvent::SeatDisqualified { seat: i as SeatId, why });
             }
         }
     }
@@ -195,6 +216,15 @@ impl Table {
     // ------------------------------------------------------------ match loop
 
     pub fn run(&mut self) {
+        let start = MatchEvent::MatchStart {
+            names: (0..self.n()).map(|i| self.agents[i].name().to_string()).collect(),
+            starting_stack: self.cfg.starting_stack,
+            small_blind: self.cfg.small_blind,
+            big_blind: self.cfg.big_blind,
+            seed: self.cfg.seed,
+            max_hands: self.cfg.max_hands,
+        };
+        self.emit(start);
         self.entry_all();
         // Put the button somewhere live before the first hand.
         if !self.live(self.button as usize) {
@@ -213,6 +243,12 @@ impl Table {
             self.play_hand();
             self.button = self.next_occupied(self.button);
         }
+
+        let end = MatchEvent::MatchEnd {
+            hands: self.hands_played,
+            stacks: self.stacks(),
+        };
+        self.emit(end);
 
         for a in self.agents.iter_mut() {
             a.shutdown();
@@ -254,16 +290,15 @@ impl Table {
             }
         }
 
-        if self.cfg.verbose {
-            let stacks: Vec<String> = (0..self.n())
-                .map(|i| format!("{}={}", self.agents[i].name(), self.seats[i].stack))
-                .collect();
-            println!(
-                "\n--- hand {hand_number}  button={}  {}",
-                self.agents[self.button as usize].name(),
-                stacks.join("  ")
-            );
-        }
+        let ev = MatchEvent::HandStart {
+            hand: hand_number,
+            button: self.button,
+            stacks: self.stacks(),
+            holes: (0..self.n())
+                .map(|i| self.seats[i].can_act().then_some(self.seats[i].hole))
+                .collect(),
+        };
+        self.emit(ev);
 
         // --- hand_start notification
         let snapshot: Vec<SeatPublic> = (0..self.n()).map(|i| self.seats[i].public(i as SeatId)).collect();
@@ -299,17 +334,14 @@ impl Table {
         }
 
         let (sb_seat, bb_seat) = self.blind_seats();
-        self.commit(sb_seat, self.cfg.small_blind);
-        self.commit(bb_seat, self.cfg.big_blind);
-        if self.cfg.verbose {
-            println!(
-                "    {} posts SB {}   {} posts BB {}",
-                self.agents[sb_seat].name(),
-                self.cfg.small_blind.min(self.seats[sb_seat].stack_at_hand_start),
-                self.agents[bb_seat].name(),
-                self.cfg.big_blind.min(self.seats[bb_seat].stack_at_hand_start),
-            );
-        }
+        let sb_amount = self.commit(sb_seat, self.cfg.small_blind);
+        let bb_amount = self.commit(bb_seat, self.cfg.big_blind);
+        self.emit(MatchEvent::BlindsPosted {
+            sb_seat: sb_seat as SeatId,
+            sb_amount,
+            bb_seat: bb_seat as SeatId,
+            bb_amount,
+        });
 
         // --- streets
         let streets = [Street::Preflop, Street::Flop, Street::Turn, Street::River];
@@ -322,9 +354,12 @@ impl Table {
                 for _ in 0..n_cards {
                     self.board.push(deck.deal());
                 }
-                if self.cfg.verbose && self.in_hand_count() > 1 {
-                    let b: Vec<String> = self.board.iter().map(|c| c.to_string()).collect();
-                    println!("    [{}] {}", street.as_str(), b.join(" "));
+                if self.in_hand_count() > 1 {
+                    let ev = MatchEvent::BoardDealt {
+                        street,
+                        board: self.board.clone(),
+                    };
+                    self.emit(ev);
                 }
             }
             if self.in_hand_count() <= 1 {
@@ -384,8 +419,12 @@ impl Table {
     }
 
     fn kill_seat(&mut self, i: usize, why: &str) {
-        eprintln!("  !! seat {i} ({}) {why}", self.agents[i].name());
         self.seats[i].status = SeatStatus::Disqualified;
+        let ev = MatchEvent::SeatDisqualified {
+            seat: i as SeatId,
+            why: why.to_string(),
+        };
+        self.emit(ev);
     }
 
     // ------------------------------------------------------------ betting
@@ -423,6 +462,13 @@ impl Table {
             }
 
             let (to_call, min_raise_to, max_raise_to) = self.limits(i, current_bet, min_raise);
+            self.emit(MatchEvent::ActionRequested {
+                seat: i as SeatId,
+                street,
+                to_call,
+                min_raise_to,
+                max_raise_to,
+            });
             let requested = self.ask(i, street, hand_number, to_call, min_raise_to, max_raise_to, current_bet);
 
             let (action, resolution) = match requested {
@@ -435,27 +481,15 @@ impl Table {
                     }
                     (
                         if to_call == 0 { Action::Check } else { Action::Fold },
-                        Resolution::Violation(msg),
+                        Outcome::Violation(msg),
                     )
                 }
             };
 
             match &resolution {
-                Resolution::Clean => {}
-                Resolution::Normalized(why) => {
-                    self.stats[i].normalizations += 1;
-                    if self.cfg.verbose {
-                        println!("      ~ {} normalized: {why}", self.agents[i].name());
-                    }
-                }
-                Resolution::Violation(why) => {
-                    self.stats[i].violations += 1;
-                    println!(
-                        "      ! {} INVALID ({why}) -> {}",
-                        self.agents[i].name(),
-                        action.as_str()
-                    );
-                }
+                Outcome::Clean => {}
+                Outcome::Normalized(_) => self.stats[i].normalizations += 1,
+                Outcome::Violation(_) => self.stats[i].violations += 1,
             }
 
             let moved = self.apply(i, action, to_call, &mut current_bet, &mut min_raise);
@@ -480,15 +514,19 @@ impl Table {
                 amount: moved,
             });
 
-            if self.cfg.verbose {
-                let detail = match action {
-                    Action::Bet { to } | Action::Raise { to } => format!(" to {to}"),
-                    Action::Call => format!(" {moved}"),
-                    _ => String::new(),
-                };
-                let allin = if self.seats[i].status == SeatStatus::AllIn { "  (all-in)" } else { "" };
-                println!("      {} {}{detail}{allin}", self.agents[i].name(), action.as_str());
-            }
+            let ev = MatchEvent::ActionTaken {
+                seat: i as SeatId,
+                street,
+                action,
+                amount: moved,
+                outcome: resolution,
+                all_in: self.seats[i].status == SeatStatus::AllIn,
+                stacks: self.stacks(),
+                street_bets: self.street_bets(),
+                pot: self.pot(),
+                current_bet,
+            };
+            self.emit(ev);
         }
     }
 
@@ -579,16 +617,16 @@ impl Table {
         min_raise_to: Chips,
         max_raise_to: Chips,
         current_bet: Chips,
-    ) -> (Action, Resolution) {
+    ) -> (Action, Outcome) {
         let fallback = if to_call == 0 { Action::Check } else { Action::Fold };
-        let violation = |why: String| (fallback, Resolution::Violation(why));
+        let violation = |why: String| (fallback, Outcome::Violation(why));
 
         match requested {
-            Action::Fold => (Action::Fold, Resolution::Clean),
+            Action::Fold => (Action::Fold, Outcome::Clean),
 
             Action::Check => {
                 if to_call == 0 {
-                    (Action::Check, Resolution::Clean)
+                    (Action::Check, Outcome::Clean)
                 } else {
                     violation(format!("check facing a bet of {to_call}"))
                 }
@@ -598,20 +636,20 @@ impl Table {
                 if to_call == 0 {
                     (
                         Action::Check,
-                        Resolution::Normalized("call with nothing to call -> check".into()),
+                        Outcome::Normalized("call with nothing to call -> check".into()),
                     )
                 } else {
-                    (Action::Call, Resolution::Clean)
+                    (Action::Call, Outcome::Clean)
                 }
             }
 
             Action::AllIn => {
                 if max_raise_to > current_bet {
-                    (Action::Raise { to: max_raise_to }, Resolution::Clean)
+                    (Action::Raise { to: max_raise_to }, Outcome::Clean)
                 } else {
                     (
                         Action::Call,
-                        Resolution::Normalized("all-in for less than the bet -> all-in call".into()),
+                        Outcome::Normalized("all-in for less than the bet -> all-in call".into()),
                     )
                 }
             }
@@ -641,10 +679,10 @@ impl Table {
                 let (action, res) =
                     Self::resolve_amount(to, min_raise_to, max_raise_to, opening, fallback);
                 if opening {
-                    if let Resolution::Clean = res {
+                    if let Outcome::Clean = res {
                         return (
                             action,
-                            Resolution::Normalized("raise with no bet outstanding -> bet".into()),
+                            Outcome::Normalized("raise with no bet outstanding -> bet".into()),
                         );
                     }
                 }
@@ -659,7 +697,7 @@ impl Table {
         max_raise_to: Chips,
         opening: bool,
         fallback: Action,
-    ) -> (Action, Resolution) {
+    ) -> (Action, Outcome) {
         debug_assert!(min_raise_to > 0, "callers must reject an illegal raise first");
         let mut note: Option<String> = None;
 
@@ -672,14 +710,14 @@ impl Table {
             // min_raise_to <= max_raise_to, so this is genuinely too small.
             return (
                 fallback,
-                Resolution::Violation(format!("{to} is below the minimum of {min_raise_to}")),
+                Outcome::Violation(format!("{to} is below the minimum of {min_raise_to}")),
             );
         }
 
         let action = if opening { Action::Bet { to } } else { Action::Raise { to } };
         match note {
-            Some(n) => (action, Resolution::Normalized(n)),
-            None => (action, Resolution::Clean),
+            Some(n) => (action, Outcome::Normalized(n)),
+            None => (action, Outcome::Clean),
         }
     }
 
@@ -812,24 +850,27 @@ impl Table {
             }
         }
 
-        if self.cfg.verbose {
-            for p in &pots {
-                let names: Vec<&str> = p.winners.iter().map(|&w| self.agents[w as usize].name()).collect();
-                let how = match (&p.hand_class, showdown) {
-                    (Some(c), true) => format!(" with {c}"),
-                    (_, false) => " (everyone else folded)".to_string(),
-                    _ => String::new(),
-                };
-                println!("    pot {} -> {}{}", p.amount, names.join(", "), how);
-            }
-            if showdown {
-                let shown: Vec<String> = revealed
-                    .iter()
-                    .map(|(s, h)| format!("{}: {} {}", self.agents[*s as usize].name(), h[0], h[1]))
-                    .collect();
-                println!("    showdown  {}", shown.join("   |   "));
-            }
+        for p in &pots {
+            let ev = MatchEvent::PotAwarded {
+                amount: p.amount,
+                winners: p.winners.clone(),
+                hand_class: p.hand_class.clone(),
+                showdown,
+            };
+            self.emit(ev);
         }
+        if showdown {
+            let ev = MatchEvent::Showdown {
+                revealed: revealed.clone(),
+            };
+            self.emit(ev);
+        }
+        let ev = MatchEvent::HandEnd {
+            hand: hand_number,
+            stacks: self.stacks(),
+            deltas: deltas.iter().map(|d| d.1).collect(),
+        };
+        self.emit(ev);
 
         let result = HandResult {
             hand_number,

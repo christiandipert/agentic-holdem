@@ -138,7 +138,6 @@ fn cfg(hands: u32, chips: u64) -> MatchConfig {
         seed: 12345,
         action_timeout_ms: 20_000,
         time_bank_ms: None,
-        verbose: false,
     }
 }
 
