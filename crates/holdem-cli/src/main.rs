@@ -159,8 +159,14 @@ fn main() {
         let on_path = !prog.contains('/');
         if !exists && !on_path {
             eprintln!("error: bot executable not found: {prog}");
-            if prog.ends_with("halfpot") {
-                eprintln!("hint: build it with  make -C bots/cpp_halfpot");
+            if !root.join("bots").is_dir() {
+                eprintln!(
+                    "hint: the default bots are found relative to the current directory,\n\
+                     \x20     so run this from the repository root (you are in {})",
+                    root.display()
+                );
+            } else if prog.ends_with("halfpot") {
+                eprintln!("hint: the C++ bot has not been built yet. Run:  make -C bots/cpp_halfpot");
             }
             std::process::exit(1);
         }
@@ -230,13 +236,24 @@ fn report(table: &Table, cfg: &MatchConfig) {
     let mut rows: Vec<usize> = (0..table.n()).collect();
     rows.sort_by_key(|&i| std::cmp::Reverse(table.stack(i)));
 
+    // Two bots can report the same name in `ready`; keep the rows telling apart.
+    let label = |i: usize| -> String {
+        let name = table.name(i);
+        let duplicated = (0..table.n()).filter(|&k| table.name(k) == name).count() > 1;
+        if duplicated {
+            format!("{name}#{i}")
+        } else {
+            name.to_string()
+        }
+    };
+
     for i in rows {
         let st = &table.stats[i];
         let net = table.stack(i) as i64 - cfg.starting_stack as i64;
         let bb100 = (net as f64 / cfg.big_blind as f64) / hands * 100.0;
         println!(
             "{:<16} {:>9} {:>+9} {:>9.1} {:>7} {:>7} {:>6} {:>5} {:>5}",
-            table.name(i),
+            label(i),
             table.stack(i),
             net,
             bb100,
